@@ -1,0 +1,13 @@
+# Build outputs and downloaded trees never belong in the repo
+*.exe
+*.dll
+*.pdb
+*.zip
+*.log
+out/
+dist/
+build*/
+installer/
+vcpkg/
+overlay-ports/
+qBittorrent/

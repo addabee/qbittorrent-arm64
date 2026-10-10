@@ -1,0 +1,169 @@
+name: Build qBittorrent Windows ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable qBittorrent tag (e.g. release-5.2.4 or 5.2.4). Leave blank for the latest stable release."
+        required: false
+        type: string
+        default: ""
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions: {}
+
+concurrency:
+  group: build-arm64
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.select.outputs.tag }}
+      version: ${{ steps.select.outputs.version }}
+      should_build: ${{ steps.select.outputs.should_build }}
+    steps:
+      - name: Select stable qBittorrent release
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "schedule" -or [string]::IsNullOrWhiteSpace($env:REQUESTED_TAG)) {
+            $remoteTags = git ls-remote --tags --refs https://github.com/qbittorrent/qBittorrent.git "refs/tags/release-*"
+            if ($LASTEXITCODE -ne 0) { throw "Unable to list qBittorrent tags." }
+            $latest = foreach ($line in $remoteTags) {
+              if ($line -match "refs/tags/(release-(\d+\.\d+\.\d+))$") {
+                [pscustomobject]@{ Tag = $Matches[1]; Version = [version]$Matches[2] }
+              }
+            }
+            $latest = $latest | Sort-Object Version | Select-Object -Last 1
+            if ($null -eq $latest) { throw "No stable release-X.Y.Z tags found." }
+            $tag = $latest.Tag
+          }
+          else {
+            $requested = $env:REQUESTED_TAG.Trim()
+            if ($requested -match "^\d+\.\d+\.\d+$") { $tag = "release-$requested" }
+            elseif ($requested -match "^release-\d+\.\d+\.\d+$") { $tag = $requested }
+            else { throw "The tag must be a stable release-X.Y.Z tag, optionally without the release- prefix." }
+          }
+          $null = $tag -match "^release-(\d+\.\d+\.\d+)$"
+          $version = $Matches[1]
+
+          $existing = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name'
+          if ($LASTEXITCODE -ne 0) { throw "Unable to list releases in this repository." }
+          $shouldBuild = "true"
+          if ($env:GITHUB_EVENT_NAME -eq "schedule" -and ($existing -contains $tag)) {
+            $shouldBuild = "false"
+            Write-Host "A release for $tag already exists; skipping the scheduled build."
+          }
+          "tag=$tag", "version=$version", "should_build=$shouldBuild" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      QBT_ROOT: C:\q
+      QBT_TAG: ${{ needs.resolve.outputs.tag }}
+      QBT_VERSION: ${{ needs.resolve.outputs.version }}
+      VCPKG_BINARY_SOURCES: "clear;files,C:\\vcpkg-cache,readwrite"
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout qBittorrent source
+        shell: pwsh
+        run: |
+          git -c advice.detachedHead=false clone --depth 1 --branch $env:QBT_TAG https://github.com/qbittorrent/qBittorrent.git "$env:QBT_ROOT\qBittorrent"
+          if ($LASTEXITCODE -ne 0) { throw "Could not clone qBittorrent $env:QBT_TAG." }
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: C:\vcpkg-cache
+          key: vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}
+
+      - name: Build dependencies (vcpkg)
+        shell: pwsh
+        run: ./scripts/install-deps.ps1 -Root $env:QBT_ROOT
+
+      - name: Build qBittorrent and portable zip
+        shell: pwsh
+        run: ./scripts/build-qbt.ps1 -Root $env:QBT_ROOT
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            if (Get-Command choco -ErrorAction SilentlyContinue) { choco install nsis -y --no-progress }
+            else { winget install --id NSIS.NSIS --silent --accept-source-agreements --accept-package-agreements --disable-interactivity }
+          }
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) { throw "NSIS installation failed." }
+
+      - name: Build installer
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -Root $env:QBT_ROOT
+
+      - name: Smoke test (portable build)
+        continue-on-error: true
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1 -Exe "$env:QBT_ROOT\dist\qBittorrent\qbittorrent.exe" -TorrentTimeout 120
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE "out"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "$env:QBT_ROOT\qBittorrent-$env:QBT_VERSION-arm64-portable.zip" $out
+          Copy-Item "$env:QBT_ROOT\installer\qbittorrent_$($env:QBT_VERSION)_arm64_setup.exe" $out
+          Push-Location $out
+          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          } | Set-Content SHA256SUMS.txt -Encoding ascii
+          Pop-Location
+          Get-Content "$out\SHA256SUMS.txt"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: qBittorrent-${{ needs.resolve.outputs.version }}-windows-arm64
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $notes = @"
+          **Unofficial** native Windows ARM64 build of qBittorrent $env:QBT_VERSION. It is not produced, endorsed or supported by the qBittorrent project.
+
+          - ``qbittorrent_$($env:QBT_VERSION)_arm64_setup.exe``: installer
+          - ``qBittorrent-$env:QBT_VERSION-arm64-portable.zip``: portable (settings are stored in the ``profile`` folder next to the exe)
+          - ``SHA256SUMS.txt``: checksums
+
+          Built from upstream tag [$env:QBT_TAG](https://github.com/qbittorrent/qBittorrent/tree/$env:QBT_TAG) with this repository at commit $env:GITHUB_SHA. See the README for the changes made to upstream.
+          License: qBittorrent is GPL-2.0-or-later ([license text](https://github.com/qbittorrent/qBittorrent/blob/$env:QBT_TAG/COPYING)). Third-party license texts are in the ``licenses`` folder.
+          "@
+          $files = Get-ChildItem out -File | ForEach-Object FullName
+          gh release view $env:QBT_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:QBT_TAG --repo $env:GITHUB_REPOSITORY --title "qBittorrent $env:QBT_VERSION (ARM64)" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "Could not update the release." }
+            gh release upload $env:QBT_TAG @files --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          else {
+            gh release create $env:QBT_TAG @files --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "qBittorrent $env:QBT_VERSION (ARM64)" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish the release." }
