@@ -141,14 +141,24 @@ Add-Result 'Add torrent via API' $addOk "$tName -> $($add.Content)"
     Add-Result 'Torrent downloads data' $ok $detail
 
     if ($t) {
-        $tr = Invoke-RestMethod "$base/api/v2/torrents/trackers?hash=$($t.hash)" -WebSession $s
-        $working = @($tr | Where-Object { $_.url -match '^(http|udp)' -and $_.status -eq 2 })
+        # tracker status 2 = working; the first announce can still be in progress (3 = updating) when data already flows via DHT
+        $working = @()
+        for ($k = 0; $k -lt 30 -and $working.Count -eq 0; $k++) {
+            $tr = Invoke-RestMethod "$base/api/v2/torrents/trackers?hash=$($t.hash)" -WebSession $s
+            $working = @($tr | Where-Object { $_.url -match '^(http|udp)' -and $_.status -eq 2 })
+            if ($working.Count -eq 0) { Start-Sleep 1 }
+        }
         Add-Result 'Tracker announce working' ($working.Count -gt 0) "$($working.Count) working tracker(s)"
 
         Invoke-WebRequest "$base/api/v2/torrents/delete" -Method Post -WebSession $s -Body @{ hashes = $t.hash; deleteFiles = 'true' } | Out-Null
         $left = 1
-        for ($k = 0; $k -lt 15 -and $left -gt 0; $k++) { Start-Sleep 1; $left = @(Invoke-RestMethod "$base/api/v2/torrents/info?tag=smoketest" -WebSession $s | ForEach-Object { $_ } | Where-Object { $_ }).Count }
-        $filesLeft = @(Get-ChildItem $saveDir -Recurse -File -EA SilentlyContinue).Count
+        # removal is asynchronous; file deletion can lag behind the torrent leaving the list
+        $filesLeft = 1
+        for ($k = 0; $k -lt 30 -and ($left -gt 0 -or $filesLeft -gt 0); $k++) {
+            Start-Sleep 1
+            $left = @(Invoke-RestMethod "$base/api/v2/torrents/info?tag=smoketest" -WebSession $s | ForEach-Object { $_ } | Where-Object { $_ }).Count
+            $filesLeft = @(Get-ChildItem $saveDir -Recurse -File -EA SilentlyContinue).Count
+        }
         Add-Result 'Delete torrent + files' ($left -eq 0 -and $filesLeft -eq 0) "torrents left: $left, files left: $filesLeft"
     }
 
