@@ -51,7 +51,9 @@ git clone --depth 1 --branch release-5.2.4 https://github.com/qbittorrent/qBitto
 
 [`.github/workflows/build-arm64.yml`](.github/workflows/build-arm64.yml) runs on GitHub's `windows-11-arm` runner. Every day it checks for a new stable qBittorrent tag, and when there is one it builds it, tests it and publishes a release.
 
-To build manually, open **Actions → Build qBittorrent Windows ARM64 → Run workflow**. You can optionally enter a tag such as `5.2.4`.
+To build manually, open **Actions → Build qBittorrent Windows ARM64 → Run workflow**. You can optionally enter a tag such as `5.2.4`. Untick **Publish** for a test build: it uploads the files as workflow artifacts and doesn't create or change a release.
+
+Dependencies are cached between runs. The cache is saved right after the dependency step, even if a later step fails, so a failed build doesn't cost the next run the roughly hour-long dependency rebuild. GitHub deletes caches that go unused for 7 days, though, so a release more than a week after the previous build still starts from scratch.
 
 ## License
 

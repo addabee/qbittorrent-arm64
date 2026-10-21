@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ""
+      publish:
+        description: "Publish a GitHub Release (untick for a test build that only uploads workflow artifacts)"
+        required: false
+        type: boolean
+        default: true
   schedule:
     - cron: "17 4 * * *"
 
@@ -88,15 +93,48 @@ jobs:
           git -c advice.detachedHead=false clone --depth 1 --branch $env:QBT_TAG https://github.com/qbittorrent/qBittorrent.git "$env:QBT_ROOT\qBittorrent"
           if ($LASTEXITCODE -ne 0) { throw "Could not clone qBittorrent $env:QBT_TAG." }
 
+      # Cache keys are immutable, so every save gets a run-unique key and restores pick the newest
+      # entry for the same dependency setup. Saving straight after the dependency step (even when it
+      # or a later step fails) keeps finished packages; GitHub evicts old entries automatically.
       - name: Restore vcpkg binary cache
-        uses: actions/cache@v6.1.0
+        id: vcpkg-restore
+        uses: actions/cache/restore@v6.1.0
         with:
           path: C:\vcpkg-cache
-          key: vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}
+          key: vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}-
+            vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}
+
+      - name: Count cached packages
+        id: cache-before
+        shell: pwsh
+        run: |
+          $n = @(Get-ChildItem C:\vcpkg-cache -Recurse -File -ErrorAction SilentlyContinue).Count
+          "count=$n" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Restored $n cached package files (restored key: '${{ steps.vcpkg-restore.outputs.cache-matched-key }}')"
 
       - name: Build dependencies (vcpkg)
+        id: deps
         shell: pwsh
         run: ./scripts/install-deps.ps1 -Root $env:QBT_ROOT
+
+      - name: Check for new cached packages
+        id: cache-after
+        if: always() && steps.cache-before.outcome == 'success'
+        shell: pwsh
+        run: |
+          $n = @(Get-ChildItem C:\vcpkg-cache -Recurse -File -ErrorAction SilentlyContinue).Count
+          $new = $n - [int]'${{ steps.cache-before.outputs.count }}'
+          "new=$new" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "$new new cached package files"
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.cache-after.outputs.new != '' && steps.cache-after.outputs.new != '0'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: C:\vcpkg-cache
+          key: vcpkg-${{ hashFiles('scripts/install-deps.ps1', 'triplets/*.cmake') }}-${{ github.run_id }}
 
       - name: Build qBittorrent and portable zip
         shell: pwsh
@@ -142,6 +180,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
+        if: github.event_name == 'schedule' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
