@@ -26,7 +26,7 @@ The files are not code-signed, so SmartScreen will warn the first time: choose *
 
 GPLv2 §2(a) requires modified versions to say what changed. These are all the changes:
 
-1. **Update checker.** In `src/gui/programupdater.cpp`, the build variant string is set to `Windows ARM64` instead of `Windows x64`, so the built-in update checker doesn't offer x64 installers. Check this repository's Releases for updates.
+1. **Update checker (5.2.x only).** In `src/gui/programupdater.cpp`, the build variant string is set to `Windows ARM64` instead of `Windows x64`, so the built-in update checker doesn't offer x64 installers. From 5.3.0, upstream's update checker only compares version numbers and opens the qbittorrent.org download page, so this patch isn't applied. If it tells you about a new version, get the ARM64 build from this repository's Releases rather than the official download page, which only offers x64.
 2. **libtorrent 2.0.x.** libtorrent is pinned to the newest 2.0.x port in vcpkg's history, because qBittorrent 5.x doesn't support libtorrent 2.1.
 3. **Installer**, built from upstream's `dist/windows` NSIS scripts with `QBT_CPU_ARCH=arm64`:
    - **Uninstaller.** It removes the Qt, OpenSSL and libtorrent DLLs, plus the Qt plugins, that this build ships as separate files. Upstream links everything into one exe, so its uninstaller only removes that exe.

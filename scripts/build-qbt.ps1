@@ -126,13 +126,18 @@ Write-Host "   qBittorrent version: $Version  triplet: $Triplet  STACKTRACE=$sta
 # --------------------------------------------------------------------------------------------
 # 1. Source patch (idempotent): updater variant string is hard-coded "Windows x64"; on ARM64
 #    that would offer the x64 installer as an "update". Use a distinct variant so nothing matches.
+#    Only needed up to 5.2.x: from 5.3.0 the updater only compares the "win" version in
+#    versions.json and opens the download web page, so there is nothing architecture-specific to patch.
 # --------------------------------------------------------------------------------------------
 if (-not $SkipUpdaterPatch) {
     $upd = Join-Path $SourceDir 'src\gui\programupdater.cpp'
     $txt = Get-Content $upd -Raw
-    if ($txt -notmatch 'Windows ARM64') {
-        $needle = '        const auto BASE_OS = u"Windows x64"_s;'
-        if (-not $txt.Contains($needle)) { throw "Updater patch: expected line not found in $upd" }
+    $needle = '        const auto BASE_OS = u"Windows x64"_s;'
+    if (($txt -notmatch 'BASE_OS') -and ($txt -match 'versions\.json')) {
+        Write-Host '   programupdater.cpp uses the versions.json updater (5.3+); no ARM64 patch needed.'
+    }
+    elseif ($txt -notmatch 'Windows ARM64') {
+        if (-not $txt.Contains($needle)) { throw "Updater patch: expected line not found in $upd (updater code changed; review it before building)" }
         $repl = "#if defined(_M_ARM64)`n        const auto BASE_OS = u`"Windows ARM64`"_s;`n#else`n$needle`n#endif"
         $txt = $txt.Replace($needle, $repl)
         [System.IO.File]::WriteAllText($upd, $txt, (New-Object System.Text.UTF8Encoding($false)))
